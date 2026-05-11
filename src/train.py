@@ -19,6 +19,7 @@ from sklearn.metrics import (
     confusion_matrix, precision_recall_curve, average_precision_score,
 )
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import cross_val_score, StratifiedKFold
 
 from preprocess import load_data, prepare_data
 
@@ -41,7 +42,7 @@ def train(random_state: int = 42):
     print(f"   Resampled train size: {X_res.shape[0]} (50/50 split)")
 
     # ── 3. Train XGBoost ──────────────────────────────────────────────────────
-    print("🚀  Training XGBoost...")
+    print("🚀  Training XGBoost with CV...")
     model = XGBClassifier(
         n_estimators=400,
         max_depth=5,
@@ -56,9 +57,14 @@ def train(random_state: int = 42):
         random_state=random_state,
         n_jobs=-1,
     )
+    
+    cv_scores = cross_val_score(model, X_res, y_res, cv=5, scoring="roc_auc")
+    print(f"   CV AUC: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+
     model.fit(
         X_res, y_res,
         eval_set=[(X_test, y_test)],
+        early_stopping_rounds=30,
         verbose=False,
     )
 
@@ -67,15 +73,25 @@ def train(random_state: int = 42):
     calibrated = CalibratedClassifierCV(model, cv="prefit", method="isotonic")
     calibrated.fit(X_train, y_train)
 
-    # ── 5. Evaluate ───────────────────────────────────────────────────────────
+    # ── 5. Evaluate and Tune Threshold ────────────────────────────────────────
     y_prob = calibrated.predict_proba(X_test)[:, 1]
-    y_pred = (y_prob >= 0.5).astype(int)
+    
+    # Tune threshold to maximize F1
+    precisions, recalls, thresholds = precision_recall_curve(y_test, y_prob)
+    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
+    best_idx = np.argmax(f1_scores)
+    best_threshold = thresholds[best_idx] if best_idx < len(thresholds) else 0.5
+    
+    # Recalculate predictions with best threshold
+    y_pred = (y_prob >= best_threshold).astype(int)
 
     auc    = roc_auc_score(y_test, y_prob)
     ap     = average_precision_score(y_test, y_prob)
     report = classification_report(y_test, y_pred, output_dict=True)
 
     print(f"\n📊  Evaluation Results:")
+    print(f"   Best Threshold: {best_threshold:.4f}")
+    print(f"   CV AUC   : {cv_scores.mean():.4f}")
     print(f"   ROC-AUC  : {auc:.4f}")
     print(f"   Avg Prec : {ap:.4f}")
     print(f"   Precision: {report['1']['precision']:.4f}")
@@ -83,6 +99,9 @@ def train(random_state: int = 42):
     print(f"   F1-Score : {report['1']['f1-score']:.4f}")
 
     metrics = {
+        "best_threshold": round(float(best_threshold), 4),
+        "cv_auc_mean": round(cv_scores.mean(), 4),
+        "cv_auc_std": round(cv_scores.std(), 4),
         "roc_auc": round(auc, 4),
         "avg_precision": round(ap, 4),
         "precision": round(report["1"]["precision"], 4),

@@ -101,10 +101,10 @@ def build_input_df(
         "savings_status":        SAVINGS_MAP[savings_status],
         "employment":            EMPLOYMENT_MAP[employment],
         "installment_commitment":installment_commitment,
-        "personal_status":       "A93",      # default: male/single (doesn't affect much)
-        "other_parties":         "A101",     # none
+        "personal_status":       "A93",      # defaulted: not collected in UI to avoid bias (gender proxy)
+        "other_parties":         "A101",     # defaulted: 'none' to simplify the demo UI
         "residence_since":       residence_since,
-        "property_magnitude":    "A121",     # real estate (neutral default)
+        "property_magnitude":    "A121",     # defaulted: 'real estate' (neutral baseline for demo)
         "age":                   age,
         "other_payment_plans":   "A143",     # none
         "housing":               HOUSING_MAP[housing],

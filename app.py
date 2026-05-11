@@ -277,6 +277,8 @@ with st.sidebar:
         metrics = load_metrics()
         if metrics:
             st.markdown("### 📊 Model Performance")
+            if "cv_auc_mean" in metrics:
+                st.metric("CV AUC", f"{metrics['cv_auc_mean']:.4f} ± {metrics.get('cv_auc_std', 0):.4f}")
             st.metric("ROC-AUC",  f"{metrics.get('roc_auc', 0):.4f}")
             st.metric("Precision", f"{metrics.get('precision', 0):.4f}")
             st.metric("Recall",    f"{metrics.get('recall', 0):.4f}")
@@ -311,7 +313,7 @@ from predict import (
     SAVINGS_MAP, EMPLOYMENT_MAP, HOUSING_MAP, JOB_MAP,
 )
 
-tabs = st.tabs(["🔍 Risk Assessment", "📊 Model Analytics", "📚 About"])
+tabs = st.tabs(["🔍 Risk Assessment", "📊 Model Analytics", "📚 About", "🗂️ Batch Scoring"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — Risk Assessment
@@ -370,6 +372,14 @@ with tabs[0]:
                 help="Number of existing credit lines at this bank"
             )
             residence_since = st.slider("Years at Current Residence", 1, 4, 2)
+            
+        st.markdown("---")
+        st.markdown("**⚙️ Risk Settings**")
+        default_thresh = 0.5
+        metrics = load_metrics()
+        if metrics and "best_threshold" in metrics:
+            default_thresh = float(metrics["best_threshold"])
+        threshold = st.slider("Approval Risk Threshold", 0.1, 0.9, default_thresh, 0.05, help="Maximum default probability allowed to approve.")
 
         submitted = st.form_submit_button("🔍 Assess Risk", use_container_width=True)
 
@@ -410,32 +420,24 @@ with tabs[0]:
         with col_verdict:
             credit_score = int(850 - prob * 550)  # map to 300-850 range
 
-            if prob < 0.35:
+            decision = "APPROVE" if prob < threshold else "REJECT"
+
+            if decision == "APPROVE":
                 verdict_html = f"""
                 <div class="score-badge-low" style="text-align:center">
                     <div style="font-size:3rem">✅</div>
-                    <div style="font-size:1.6rem;font-weight:800;color:#10b981;margin:8px 0">LOW RISK</div>
-                    <div style="color:#94a3b8;font-size:0.9rem">Recommended for approval</div>
+                    <div style="font-size:1.6rem;font-weight:800;color:#10b981;margin:8px 0">APPROVE</div>
+                    <div style="color:#94a3b8;font-size:0.9rem">Risk ({prob:.1%}) is below threshold ({threshold:.2f})</div>
                     <div style="margin-top:14px;font-size:0.85rem;color:#64748b">Estimated Credit Score</div>
                     <div style="font-size:2rem;font-weight:700;color:#10b981">{credit_score}</div>
-                </div>
-                """
-            elif prob < 0.60:
-                verdict_html = f"""
-                <div class="score-badge-medium" style="text-align:center">
-                    <div style="font-size:3rem">⚠️</div>
-                    <div style="font-size:1.6rem;font-weight:800;color:#f59e0b;margin:8px 0">MEDIUM RISK</div>
-                    <div style="color:#94a3b8;font-size:0.9rem">Requires manual review</div>
-                    <div style="margin-top:14px;font-size:0.85rem;color:#64748b">Estimated Credit Score</div>
-                    <div style="font-size:2rem;font-weight:700;color:#f59e0b">{credit_score}</div>
                 </div>
                 """
             else:
                 verdict_html = f"""
                 <div class="score-badge-high" style="text-align:center">
                     <div style="font-size:3rem">❌</div>
-                    <div style="font-size:1.6rem;font-weight:800;color:#ef4444;margin:8px 0">HIGH RISK</div>
-                    <div style="color:#94a3b8;font-size:0.9rem">Likely to be rejected</div>
+                    <div style="font-size:1.6rem;font-weight:800;color:#ef4444;margin:8px 0">REJECT</div>
+                    <div style="color:#94a3b8;font-size:0.9rem">Risk ({prob:.1%}) exceeds threshold ({threshold:.2f})</div>
                     <div style="margin-top:14px;font-size:0.85rem;color:#64748b">Estimated Credit Score</div>
                     <div style="font-size:2rem;font-weight:700;color:#ef4444">{credit_score}</div>
                 </div>
@@ -575,3 +577,62 @@ with tabs[2]:
     - **Default rate**: ~30%
     - **Features**: 20 raw + 7 engineered = 27 total
     """)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Batch Scoring
+# ══════════════════════════════════════════════════════════════════════════════
+with tabs[3]:
+    st.markdown("### 🗂️ Batch Scoring")
+    st.markdown("Upload a CSV file containing multiple applicants to score them all at once. Ensure the CSV has columns matching the input form.")
+    
+    uploaded_file = st.file_uploader("Upload Applicants CSV", type="csv")
+    
+    if uploaded_file is not None:
+        batch_df = pd.read_csv(uploaded_file)
+        st.write("Preview of uploaded data:")
+        st.dataframe(batch_df.head(), use_container_width=True)
+        
+        if st.button("Score Batch"):
+            with st.spinner("Scoring batch..."):
+                try:
+                    # In a real app we would map columns dynamically, 
+                    # but here we rely on the predict module directly or expect processed data
+                    preprocessor  = joblib.load(os.path.join(ARTIFACTS_DIR, "preprocessor.pkl"))
+                    model         = joblib.load(os.path.join(ARTIFACTS_DIR, "model.pkl"))
+                    
+                    # For demo purposes, we will try to pass it to preprocessor 
+                    # (assuming the uploaded CSV is already in the right schema, e.g., the test set)
+                    # We will catch errors and warn the user.
+                    from preprocess import engineer_features
+                    try:
+                        proc_df = engineer_features(batch_df)
+                        if "class" in proc_df.columns:
+                            proc_df = proc_df.drop(columns=["class"])
+                        X_proc = preprocessor.transform(proc_df)
+                        probs = model.predict_proba(X_proc)[:, 1]
+                        
+                        results_df = batch_df.copy()
+                        results_df["Default Probability"] = probs
+                        
+                        default_thresh = 0.5
+                        metrics = load_metrics()
+                        if metrics and "best_threshold" in metrics:
+                            default_thresh = float(metrics["best_threshold"])
+                        
+                        results_df["Decision"] = ["REJECT" if p >= default_thresh else "APPROVE" for p in probs]
+                        
+                        st.success(f"Successfully scored {len(results_df)} applicants!")
+                        st.dataframe(results_df, use_container_width=True)
+                        
+                        csv = results_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            "Download Results as CSV",
+                            csv,
+                            "batch_scoring_results.csv",
+                            "text/csv",
+                            key='download-csv'
+                        )
+                    except Exception as e:
+                        st.error(f"Error processing features: {e}. Please ensure the CSV has the exact raw schema as the German Credit dataset.")
+                except Exception as e:
+                    st.error(f"Scoring failed: {e}")
